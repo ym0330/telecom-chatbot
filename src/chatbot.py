@@ -3,6 +3,8 @@ from openai import OpenAI
 from dotenv import load_dotenv
 from database import DatabaseHandler
 import json
+from fuzzywuzzy import fuzz
+from fuzzywuzzy import process
 
 load_dotenv()
 
@@ -18,31 +20,65 @@ class TelecomChatbot:
         if message.strip().isdigit():
             return self.handle_numbered_response(message)
             
+        # Handle greetings
+        greetings = ["hi", "hello", "hey", "good morning", "good afternoon", "good evening"]
+        if message.lower() in greetings:
+            return {
+                "intent": "main_menu",
+                "entities": {},
+                "urgency": "low"
+            }
+            
         # First check database keywords for matches
         message_lower = message.lower()
-        keywords = self.db.get_all_keywords()
+        words = message_lower.split()
         
-        # Find matching keyword
-        matching_keyword = None
-        for keyword in keywords:
-            if keyword.lower() in message_lower:
-                matching_keyword = keyword
+        # Try to find matching intent from keywords
+        matching_intent = None
+        for word in words:
+            intent = self.db.get_intent_by_keyword(word)
+            if intent:
+                matching_intent = intent
                 break
         
-        if matching_keyword:
-            # Get intent from keyword
-            intent_name = self.db.get_intent_by_keyword(matching_keyword)
-            if intent_name:
-                return {
-                    "intent": intent_name,
-                    "entities": {
-                        "amount": None,
-                        "date": None,
-                        "account_number": None,
-                        "plan_type": None
-                    },
-                    "urgency": "low"
-                }
+        if matching_intent:
+            return {
+                "intent": matching_intent,
+                "entities": {
+                    "amount": None,
+                    "date": None,
+                    "account_number": None,
+                    "plan_type": None
+                },
+                "urgency": "low"
+            }
+        
+        # If no match found, try fuzzy matching on the whole message
+        best_match = None
+        best_score = 0
+        for word in words:
+            suggestions = self.db.get_fuzzy_suggestions(word)
+            if suggestions:
+                # Get the best matching intent from suggestions
+                for suggestion in suggestions:
+                    intent = self.db.get_intent_by_keyword(suggestion)
+                    if intent:
+                        score = fuzz.ratio(word, suggestion)
+                        if score > best_score:
+                            best_score = score
+                            best_match = intent
+        
+        if best_match and best_score >= 60:
+            return {
+                "intent": best_match,
+                "entities": {
+                    "amount": None,
+                    "date": None,
+                    "account_number": None,
+                    "plan_type": None
+                },
+                "urgency": "low"
+            }
             
         # If no keyword match found, use OpenAI for intent analysis
         prompt = f"""
@@ -81,7 +117,7 @@ class TelecomChatbot:
         except Exception as e:
             print(f"Error analyzing intent: {str(e)}")
             return {
-                "intent": "unknown",
+                "intent": "main_menu",
                 "entities": {},
                 "urgency": "low"
             }
@@ -130,31 +166,15 @@ class TelecomChatbot:
                 1: {"intent": "compare_plans", "entities": {}},
                 2: {"intent": "upgrade_plan", "entities": {}},
                 3: {"intent": "view_plan_features", "entities": {}}
-            },
-            "view_usage": {
-                1: {"intent": "usage_breakdown", "entities": {}},
-                2: {"intent": "setup_alerts", "entities": {}},
-                3: {"intent": "change_data_plan", "entities": {}}
-            },
-            "usage_breakdown": {
-                1: {"intent": "daily_usage", "entities": {}},
-                2: {"intent": "weekly_usage", "entities": {}},
-                3: {"intent": "monthly_usage", "entities": {}}
-            },
-            "setup_alerts": {
-                1: {"intent": "set_alert_threshold", "entities": {}},
-                2: {"intent": "set_alert_frequency", "entities": {}},
-                3: {"intent": "view_current_alerts", "entities": {}}
-            },
-            "change_data_plan": {
-                1: {"intent": "increase_data", "entities": {}},
-                2: {"intent": "decrease_data", "entities": {}},
-                3: {"intent": "view_plan_options", "entities": {}}
             }
         }
         
+        # Get the mapped intent based on the last intent and number
         if self.last_intent in response_mapping and number in response_mapping[self.last_intent]:
-            return response_mapping[self.last_intent][number]
+            mapped_intent = response_mapping[self.last_intent][number]
+            # Update the last intent to the mapped intent for next numbered response
+            self.last_intent = mapped_intent["intent"]
+            return mapped_intent
             
         return {
             "intent": "general_query",
@@ -212,26 +232,33 @@ class TelecomChatbot:
 
     def handle_numbered_menu_response(self, intent: str, user_data: dict) -> str:
         """Handle responses for numbered menu options"""
-        responses = {
-            "account_info": f"I can help you with your account information. Your account {user_data['account_number']} is currently {user_data['status']}. Your plan is {user_data['plan_type']} with a monthly fee of {user_data['monthly_fee']}. Would you like to:\n1. Update your account details\n2. Change your plan\n3. View your usage",
-            "view_usage": f"Your current data usage is {user_data['data_usage']} out of {user_data['data_limit']}. Would you like to:\n1. View detailed usage breakdown\n2. Set up usage alerts\n3. Change your data plan",
-            "usage_breakdown": "Please select the time period for your usage breakdown:\n1. Daily usage\n2. Weekly usage\n3. Monthly usage",
-            "setup_alerts": "Let's set up usage alerts. Would you like to:\n1. Set alert threshold\n2. Set alert frequency\n3. View current alerts",
-            "change_data_plan": "What would you like to do with your data plan?\n1. Increase data allowance\n2. Decrease data allowance\n3. View plan options",
-            "view_bill_details": f"Your last bill was generated on {user_data['last_bill_date']} for {user_data['last_bill_amount']}. Would you like to:\n1. View itemized charges\n2. Download the bill\n3. Set up paperless billing",
-            "troubleshoot": "Let's go through some basic troubleshooting steps:\n1. Check your device settings\n2. Test your network connection\n3. Restart your device\nWhich step would you like to try first?",
-            "compare_plans": "Here are our available plans:\n1. Basic: $49.99/month (50GB data)\n2. Premium: $99.99/month (100GB data)\n3. Business: $199.99/month (Unlimited data)\nWould you like to:\n1. Compare plan features\n2. Upgrade your plan\n3. View your current plan details",
-            "daily_usage": f"Here's your daily usage breakdown:\n- Data used: {user_data['data_usage']}GB\n- Data remaining: {user_data['data_limit'] - user_data['data_usage']}GB\n- Peak usage times: 2 PM - 8 PM\nWould you like to:\n1. View detailed breakdown\n2. Set up usage alerts\n3. Change your plan",
-            "weekly_usage": f"Here's your weekly usage breakdown:\n- Data used: {user_data['data_usage']}GB\n- Data remaining: {user_data['data_limit'] - user_data['data_usage']}GB\n- Peak usage times: 2 PM - 8 PM\nWould you like to:\n1. View detailed breakdown\n2. Set up usage alerts\n3. Change your plan",
-            "monthly_usage": f"Here's your monthly usage breakdown:\n- Data used: {user_data['data_usage']}GB\n- Data remaining: {user_data['data_limit'] - user_data['data_usage']}GB\n- Peak usage times: 2 PM - 8 PM\nWould you like to:\n1. View detailed breakdown\n2. Set up usage alerts\n3. Change your plan",
-            "set_alert_threshold": "Please enter the percentage threshold for your usage alert (e.g., 80 for 80% of your data limit)",
-            "set_alert_frequency": "How often would you like to receive alerts?\n1. Daily\n2. Weekly\n3. When threshold is reached",
-            "view_current_alerts": "Your current alert settings:\n- Threshold: 80%\n- Frequency: Daily\n- Status: Active\nWould you like to:\n1. Modify threshold\n2. Change frequency\n3. Disable alerts",
-            "increase_data": "To increase your data allowance, please select a new plan:\n1. Basic: $49.99/month (50GB data)\n2. Premium: $99.99/month (100GB data)\n3. Business: $199.99/month (Unlimited data)",
-            "decrease_data": "To decrease your data allowance, please select a new plan:\n1. Basic: $49.99/month (50GB data)\n2. Premium: $99.99/month (100GB data)\n3. Business: $199.99/month (Unlimited data)",
-            "view_plan_options": "Here are your current plan options:\n1. Basic: $49.99/month (50GB data)\n2. Premium: $99.99/month (100GB data)\n3. Business: $199.99/month (Unlimited data)\nWould you like to:\n1. Compare features\n2. Switch plan\n3. View current usage"
-        }
-        return responses.get(intent, "I'm not sure how to help with that specific option. Please try again.")
+        if not user_data:
+            return "I apologize, but I couldn't find your account information. Please make sure you're logged in with a valid user ID."
+            
+        try:
+            responses = {
+                "account_info": f"I can help you with your account information. Your account {user_data.get('account_number', 'N/A')} is currently {user_data.get('status', 'N/A')}. Your plan is {user_data.get('plan_type', 'N/A')} with a monthly fee of {user_data.get('monthly_fee', 'N/A')}. Would you like to:\n1. Update your account details\n2. Change your plan\n3. View your usage",
+                "view_usage": f"Your current data usage is {user_data.get('data_usage', 'N/A')} out of {user_data.get('data_limit', 'N/A')}. Would you like to:\n1. View detailed usage breakdown\n2. Set up usage alerts\n3. Change your data plan",
+                "usage_breakdown": "Please select the time period for your usage breakdown:\n1. Daily usage\n2. Weekly usage\n3. Monthly usage",
+                "setup_alerts": "Let's set up usage alerts. Would you like to:\n1. Set alert threshold\n2. Set alert frequency\n3. View current alerts",
+                "change_data_plan": "What would you like to do with your data plan?\n1. Increase data allowance\n2. Decrease data allowance\n3. View plan options",
+                "view_bill_details": f"Your last bill was generated on {user_data.get('last_bill_date', 'N/A')} for {user_data.get('last_bill_amount', 'N/A')}. Would you like to:\n1. View itemized charges\n2. Download the bill\n3. Set up paperless billing",
+                "troubleshoot": "Let's go through some basic troubleshooting steps:\n1. Check your device settings\n2. Test your network connection\n3. Restart your device\nWhich step would you like to try first?",
+                "compare_plans": "Here are our available plans:\n1. Basic: $49.99/month (50GB data)\n2. Premium: $99.99/month (100GB data)\n3. Business: $199.99/month (Unlimited data)\nWould you like to:\n1. Compare plan features\n2. Upgrade your plan\n3. View your current plan details",
+                "daily_usage": f"Here's your daily usage breakdown:\n- Data used: {user_data.get('data_usage', 'N/A')}GB\n- Data remaining: {user_data.get('data_limit', 'N/A')}GB\n- Peak usage times: 2 PM - 8 PM\nWould you like to:\n1. View detailed breakdown\n2. Set up usage alerts\n3. Change your plan",
+                "weekly_usage": f"Here's your weekly usage breakdown:\n- Data used: {user_data.get('data_usage', 'N/A')}GB\n- Data remaining: {user_data.get('data_limit', 'N/A')}GB\n- Peak usage times: 2 PM - 8 PM\nWould you like to:\n1. View detailed breakdown\n2. Set up usage alerts\n3. Change your plan",
+                "monthly_usage": f"Here's your monthly usage breakdown:\n- Data used: {user_data.get('data_usage', 'N/A')}GB\n- Data remaining: {user_data.get('data_limit', 'N/A')}GB\n- Peak usage times: 2 PM - 8 PM\nWould you like to:\n1. View detailed breakdown\n2. Set up usage alerts\n3. Change your plan",
+                "set_alert_threshold": "Please enter the percentage threshold for your usage alert (e.g., 80 for 80% of your data limit)",
+                "set_alert_frequency": "How often would you like to receive alerts?\n1. Daily\n2. Weekly\n3. When threshold is reached",
+                "view_current_alerts": "Your current alert settings:\n- Threshold: 80%\n- Frequency: Daily\n- Status: Active\nWould you like to:\n1. Modify threshold\n2. Change frequency\n3. Disable alerts",
+                "increase_data": "To increase your data allowance, please select a new plan:\n1. Basic: $49.99/month (50GB data)\n2. Premium: $99.99/month (100GB data)\n3. Business: $199.99/month (Unlimited data)",
+                "decrease_data": "To decrease your data allowance, please select a new plan:\n1. Basic: $49.99/month (50GB data)\n2. Premium: $99.99/month (100GB data)\n3. Business: $199.99/month (Unlimited data)",
+                "view_plan_options": "Here are your current plan options:\n1. Basic: $49.99/month (50GB data)\n2. Premium: $99.99/month (100GB data)\n3. Business: $199.99/month (Unlimited data)\nWould you like to:\n1. Compare features\n2. Switch plan\n3. View current usage"
+            }
+            return responses.get(intent, "I'm not sure how to help with that specific option. Please try again.")
+        except Exception as e:
+            print(f"Error in handle_numbered_menu_response: {str(e)}")
+            return "I apologize, but I encountered an error while processing your request. Please try again."
 
     def get_follow_up_questions(self, intent: str) -> str:
         """Get relevant follow-up questions based on the intent"""

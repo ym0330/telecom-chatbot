@@ -2,6 +2,8 @@ from pymongo import MongoClient
 from datetime import datetime
 import os
 from dotenv import load_dotenv
+from fuzzywuzzy import fuzz
+from fuzzywuzzy import process
 
 load_dotenv()
 
@@ -9,7 +11,7 @@ class DatabaseHandler:
     def __init__(self):
         # Connect to MongoDB
         self.client = MongoClient(os.getenv('MONGODB_URI', 'mongodb://localhost:27017/'))
-        self.db = self.client['telecom_chatbot']
+        self.db = self.client['chatbot']
         
         # Initialize collections
         self.chat_history = self.db['chat_history']
@@ -20,6 +22,13 @@ class DatabaseHandler:
         
         # Create indexes
         self._create_indexes()
+        
+        # Cache keywords for faster fuzzy matching
+        self._cache_keywords()
+
+    def _cache_keywords(self):
+        """Cache keywords for faster fuzzy matching"""
+        self.keyword_cache = [(doc["keyword"], doc["intent_name"]) for doc in self.keyword.find()]
 
     def _create_indexes(self):
         """Create necessary indexes for collections"""
@@ -38,6 +47,28 @@ class DatabaseHandler:
         # Index for user_data
         self.user_data.create_index([("user_id", 1)], unique=True)
 
+    def get_intent_by_keyword(self, keyword: str, threshold: int = 80) -> str:
+        """Get intent name based on keyword using fuzzy matching"""
+        # First try exact match
+        keyword_doc = self.keyword.find_one({"keyword": keyword.lower()})
+        if keyword_doc:
+            return keyword_doc.get("intent_name")
+        
+        # If no exact match, try fuzzy matching
+        best_match = process.extractOne(keyword.lower(), [k[0] for k in self.keyword_cache])
+        if best_match and best_match[1] >= threshold:
+            # Find the intent for the matched keyword
+            for k, intent in self.keyword_cache:
+                if k == best_match[0]:
+                    return intent
+        
+        return None
+
+    def get_fuzzy_suggestions(self, keyword: str, limit: int = 3) -> list:
+        """Get similar keywords as suggestions"""
+        matches = process.extract(keyword.lower(), [k[0] for k in self.keyword_cache], limit=limit)
+        return [match[0] for match in matches if match[1] >= 60]
+
     def save_conversation(self, user_id: str, user_message: str, bot_response: str):
         """Save a conversation to chat_history"""
         conversation = {
@@ -51,13 +82,6 @@ class DatabaseHandler:
     def get_user_data(self, user_id: str) -> dict:
         """Get user data from user_data collection"""
         return self.user_data.find_one({"user_id": user_id})
-
-    def get_intent_by_keyword(self, keyword: str) -> str:
-        """Get intent name based on keyword"""
-        keyword_doc = self.keyword.find_one({"keyword": keyword.lower()})
-        if keyword_doc:
-            return keyword_doc.get("intent_name")
-        return None
 
     def get_response_by_intent(self, intent_name: str) -> str:
         """Get response template based on intent"""
