@@ -5,6 +5,8 @@ from database import DatabaseHandler
 import json
 from fuzzywuzzy import fuzz
 from fuzzywuzzy import process
+from typing import Optional, Dict, Any
+from chatbot_rules import SYSTEM_RULES, MENU_STRUCTURE
 
 load_dotenv()
 
@@ -13,6 +15,62 @@ class TelecomChatbot:
         self.client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
         self.db = DatabaseHandler()
         self.last_intent = None
+        self.system_rules = SYSTEM_RULES
+        self.menu_structure = MENU_STRUCTURE
+        self.menu_history = []  # Track menu navigation history
+        
+        # Initialize predefined responses
+        self._initialize_responses()
+
+    def _initialize_responses(self):
+        """Initialize predefined responses in the database"""
+        # Network issues
+        self.db.add_response("network_issues", {
+            "intent_name": "network_issues",
+            "response_template": "I understand you're experiencing network issues. Let me help you troubleshoot. First, could you please try turning your device off and on again? If the issue persists, I can help you check your signal strength and network settings."
+        })
+
+        # Billing issues
+        self.db.add_response("billing_issues", {
+            "intent_name": "billing_issues",
+            "response_template": "I can help you with your billing concerns. Could you please provide your account number or the last 4 digits of your phone number? This will help me access your billing information securely."
+        })
+
+        # Account management
+        self.db.add_response("account_management", {
+            "intent_name": "account_management",
+            "response_template": "I can help you manage your account. What specific changes would you like to make? Options include updating personal information, changing your plan, or modifying your payment method."
+        })
+
+        # Data usage
+        self.db.add_response("data_usage", {
+            "intent_name": "data_usage",
+            "response_template": "I can help you check your data usage. Would you like to know your current usage, remaining data, or would you like to purchase additional data?"
+        })
+
+        # Plan information
+        self.db.add_response("plan_info", {
+            "intent_name": "plan_info",
+            "response_template": "I can provide information about our available plans. Would you like to know about our current promotions, compare plans, or get details about your current plan?"
+        })
+
+        # Payment issues
+        self.db.add_response("payment_issues", {
+            "intent_name": "payment_issues",
+            "response_template": "I understand you're having issues with your payment. I can help you with payment processing, setting up automatic payments, or resolving any payment-related concerns."
+        })
+
+        # Technical support
+        self.db.add_response("technical_support", {
+            "intent_name": "technical_support",
+            "response_template": "I can help you with technical support. Please describe the issue you're experiencing, and I'll guide you through the troubleshooting process."
+        })
+
+        # General inquiries
+        self.db.add_response("general_inquiry", {
+            "intent_name": "general_inquiry",
+            "response_template": "I'm here to help you with any questions about our services. What would you like to know?"
+        })
 
     def analyze_intent(self, message: str) -> dict:
         """Use OpenAI to analyze the user's intent and extract relevant information"""
@@ -33,42 +91,84 @@ class TelecomChatbot:
         message_lower = message.lower()
         words = message_lower.split()
         
+        # Get all keywords and their intents from database
+        keywords = self.db.get_all_keywords()
+        if not keywords:
+            # If no keywords found, proceed with OpenAI analysis
+            return self._analyze_with_openai(message)
+        
         # Try to find matching intent from keywords
-        matching_intent = None
-        for word in words:
-            intent = self.db.get_intent_by_keyword(word)
-            if intent:
-                matching_intent = intent
-                break
-        
-        if matching_intent:
-            return {
-                "intent": matching_intent,
-                "entities": {
-                    "amount": None,
-                    "date": None,
-                    "account_number": None,
-                    "plan_type": None
-                },
-                "urgency": "low"
-            }
-        
-        # If no match found, try fuzzy matching on the whole message
         best_match = None
         best_score = 0
-        for word in words:
-            suggestions = self.db.get_fuzzy_suggestions(word)
-            if suggestions:
-                # Get the best matching intent from suggestions
-                for suggestion in suggestions:
-                    intent = self.db.get_intent_by_keyword(suggestion)
-                    if intent:
-                        score = fuzz.ratio(word, suggestion)
-                        if score > best_score:
-                            best_score = score
-                            best_match = intent
+        best_keyword = None
         
-        if best_match and best_score >= 60:
+        # Common misspellings and phonetic variations
+        phonetic_variations = {
+            'pay': ['pai', 'pae', 'pey', 'paiy'],
+            'bill': ['bil', 'bll', 'bile'],
+            'account': ['acount', 'acct', 'accnt'],
+            'support': ['suport', 'soport', 'supprt'],
+            'data': ['date', 'dta', 'dtaa'],
+            'plan': ['pln', 'plann', 'plane'],
+            'service': ['servis', 'servce', 'srvice'],
+            'payment': ['paymnt', 'paymet', 'pament'],
+            'balance': ['balnce', 'balanc', 'balence'],
+            'usage': ['usge', 'usag', 'usgae']
+        }
+        
+        for word in words:
+            # Check for exact matches first
+            for keyword, intent in keywords.items():
+                if word == keyword.lower():
+                    return {
+                        "intent": intent,
+                        "entities": {
+                            "amount": None,
+                            "date": None,
+                            "account_number": None,
+                            "plan_type": None
+                        },
+                        "urgency": "low"
+                    }
+            
+            # Check for phonetic variations
+            for correct_word, variations in phonetic_variations.items():
+                if word in variations:
+                    # Find the intent for the correct word
+                    for keyword, intent in keywords.items():
+                        if correct_word in keyword.lower():
+                            return {
+                                "intent": intent,
+                                "entities": {
+                                    "amount": None,
+                                    "date": None,
+                                    "account_number": None,
+                                    "plan_type": None
+                                },
+                                "urgency": "low"
+                            }
+            
+            # If no exact match, try fuzzy matching
+            for keyword, intent in keywords.items():
+                # Calculate multiple similarity scores
+                ratio_score = fuzz.ratio(word, keyword.lower())
+                partial_score = fuzz.partial_ratio(word, keyword.lower())
+                token_score = fuzz.token_sort_ratio(word, keyword.lower())
+                
+                # Use the highest score
+                score = max(ratio_score, partial_score, token_score)
+                
+                # Adjust threshold based on word length
+                threshold = 80 if len(word) > 3 else 70
+                
+                if score > best_score and score >= threshold:
+                    best_score = score
+                    best_match = intent
+                    best_keyword = keyword
+        
+        if best_match:
+            # Log the correction for future reference
+            print(f"Corrected '{words[0]}' to '{best_keyword}' with score {best_score}")
             return {
                 "intent": best_match,
                 "entities": {
@@ -79,10 +179,29 @@ class TelecomChatbot:
                 },
                 "urgency": "low"
             }
-            
+        
         # If no keyword match found, use OpenAI for intent analysis
+        return self._analyze_with_openai(message)
+
+    def _analyze_with_openai(self, message: str) -> dict:
+        """Use OpenAI to analyze the user's intent when no keyword match is found"""
+        # Create a system message that combines the rules with the analysis task
+        system_message = f"""
+        {self.system_rules}
+
+        As a telecom customer service assistant, you must follow these rules strictly:
+        1. Always maintain the menu structure and navigation rules
+        2. Use the predefined response templates
+        3. Follow the back navigation rules
+        4. Maintain context throughout the conversation
+        5. Be polite and professional
+        6. Keep responses clear and concise
+        7. Always provide numbered options when appropriate
+        8. Handle user data securely
+        """
+        
         prompt = f"""
-        You are a telecom customer service assistant. Analyze the following user message and extract:
+        Analyze the following user message and extract:
         1. The main intent (must be one of: payment, billing, technical_support, account_info, plan_info, or general_query)
         2. Any relevant entities (amounts, dates, account numbers)
         3. The urgency level (high, medium, low)
@@ -108,14 +227,14 @@ class TelecomChatbot:
             response = self.client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[
-                    {"role": "system", "content": "You are a helpful assistant that analyzes user messages and extracts intent and relevant information."},
+                    {"role": "system", "content": system_message},
                     {"role": "user", "content": prompt}
                 ],
                 response_format={ "type": "json_object" }
             )
             return json.loads(response.choices[0].message.content)
         except Exception as e:
-            print(f"Error analyzing intent: {str(e)}")
+            print(f"Error analyzing intent with OpenAI: {str(e)}")
             return {
                 "intent": "main_menu",
                 "entities": {},
@@ -134,44 +253,21 @@ class TelecomChatbot:
                 "urgency": "low"
             }
             
-        # Map numbered responses to specific intents
-        response_mapping = {
-            "main_menu": {
-                1: {"intent": "account_info", "entities": {}},
-                2: {"intent": "billing", "entities": {}},
-                3: {"intent": "technical_support", "entities": {}},
-                4: {"intent": "plan_info", "entities": {}}
-            },
-            "account_info": {
-                1: {"intent": "update_account", "entities": {}},
-                2: {"intent": "change_plan", "entities": {}},
-                3: {"intent": "view_usage", "entities": {}}
-            },
-            "payment": {
-                1: {"intent": "make_payment", "entities": {}},
-                2: {"intent": "setup_auto_pay", "entities": {}},
-                3: {"intent": "view_payment_history", "entities": {}}
-            },
-            "billing": {
-                1: {"intent": "view_bill_details", "entities": {}},
-                2: {"intent": "download_bill", "entities": {}},
-                3: {"intent": "setup_paperless", "entities": {}}
-            },
-            "technical_support": {
-                1: {"intent": "troubleshoot", "entities": {}},
-                2: {"intent": "schedule_technician", "entities": {}},
-                3: {"intent": "check_service_status", "entities": {}}
-            },
-            "plan_info": {
-                1: {"intent": "compare_plans", "entities": {}},
-                2: {"intent": "upgrade_plan", "entities": {}},
-                3: {"intent": "view_plan_features", "entities": {}}
-            }
-        }
-        
         # Get the mapped intent based on the last intent and number
-        if self.last_intent in response_mapping and number in response_mapping[self.last_intent]:
-            mapped_intent = response_mapping[self.last_intent][number]
+        if self.last_intent in self.menu_structure and number in self.menu_structure[self.last_intent]["options"]:
+            mapped_intent = {
+                "intent": self.menu_structure[self.last_intent]["options"][number]["intent"],
+                "entities": {}
+            }
+            
+            # Handle back navigation
+            if mapped_intent["intent"] == "main_menu":
+                # Clear history and go back to main menu
+                self.menu_history = []
+            else:
+                # Add current menu to history
+                self.menu_history.append(self.last_intent)
+            
             # Update the last intent to the mapped intent for next numbered response
             self.last_intent = mapped_intent["intent"]
             return mapped_intent
@@ -193,17 +289,26 @@ class TelecomChatbot:
 
         # Handle main menu
         if intent == "main_menu":
-            return "I'm here to help with any telecom-related questions. I can assist you with:\n1. Account information\n2. Billing and payments\n3. Technical support\n4. Plan information\nWhat would you like to know more about?"
+            welcome_message = f"""Welcome to Telecom Support! I'm here to help you with your telecom needs. I follow a structured menu system to assist you effectively.
+
+Here's what I can help you with:"""
+
+            # Add menu options from MENU_STRUCTURE
+            for option_num, option in self.menu_structure["main_menu"]["options"].items():
+                welcome_message += f"\n{option_num}. {option['text']}"
+                # Add sub-options if available
+                if option["intent"] in self.menu_structure:
+                    for sub_option_num, sub_option in self.menu_structure[option["intent"]]["options"].items():
+                        welcome_message += f"\n   - {sub_option['text']}"
+
+            welcome_message += "\n\nPlease select a number (1-5) to get started with the service you need help with."
+            return welcome_message
 
         # Get user data if needed
         user_data = self.db.get_user_data(user_id)
         
         # Handle numbered responses separately
-        if intent in ["account_info", "view_usage", "usage_breakdown", "setup_alerts", 
-                     "change_data_plan", "view_bill_details", "troubleshoot", 
-                     "compare_plans", "daily_usage", "weekly_usage", "monthly_usage",
-                     "set_alert_threshold", "set_alert_frequency", "view_current_alerts",
-                     "increase_data", "decrease_data", "view_plan_options"]:
+        if intent in self.menu_structure:
             return self.handle_numbered_menu_response(intent, user_data)
         
         # Get response from database based on intent
@@ -223,11 +328,6 @@ class TelecomChatbot:
                 if value:
                     response = response.replace(f"{{{key}}}", str(value))
         
-        # Add follow-up questions based on intent
-        follow_up = self.get_follow_up_questions(intent)
-        if follow_up:
-            response += f"\n\n{follow_up}"
-        
         return response
 
     def handle_numbered_menu_response(self, intent: str, user_data: dict) -> str:
@@ -236,57 +336,89 @@ class TelecomChatbot:
             return "I apologize, but I couldn't find your account information. Please make sure you're logged in with a valid user ID."
             
         try:
-            responses = {
-                "account_info": f"I can help you with your account information. Your account {user_data.get('account_number', 'N/A')} is currently {user_data.get('status', 'N/A')}. Your plan is {user_data.get('plan_type', 'N/A')} with a monthly fee of {user_data.get('monthly_fee', 'N/A')}. Would you like to:\n1. Update your account details\n2. Change your plan\n3. View your usage",
-                "view_usage": f"Your current data usage is {user_data.get('data_usage', 'N/A')} out of {user_data.get('data_limit', 'N/A')}. Would you like to:\n1. View detailed usage breakdown\n2. Set up usage alerts\n3. Change your data plan",
-                "usage_breakdown": "Please select the time period for your usage breakdown:\n1. Daily usage\n2. Weekly usage\n3. Monthly usage",
-                "setup_alerts": "Let's set up usage alerts. Would you like to:\n1. Set alert threshold\n2. Set alert frequency\n3. View current alerts",
-                "change_data_plan": "What would you like to do with your data plan?\n1. Increase data allowance\n2. Decrease data allowance\n3. View plan options",
-                "view_bill_details": f"Your last bill was generated on {user_data.get('last_bill_date', 'N/A')} for {user_data.get('last_bill_amount', 'N/A')}. Would you like to:\n1. View itemized charges\n2. Download the bill\n3. Set up paperless billing",
-                "troubleshoot": "Let's go through some basic troubleshooting steps:\n1. Check your device settings\n2. Test your network connection\n3. Restart your device\nWhich step would you like to try first?",
-                "compare_plans": "Here are our available plans:\n1. Basic: $49.99/month (50GB data)\n2. Premium: $99.99/month (100GB data)\n3. Business: $199.99/month (Unlimited data)\nWould you like to:\n1. Compare plan features\n2. Upgrade your plan\n3. View your current plan details",
-                "daily_usage": f"Here's your daily usage breakdown:\n- Data used: {user_data.get('data_usage', 'N/A')}GB\n- Data remaining: {user_data.get('data_limit', 'N/A')}GB\n- Peak usage times: 2 PM - 8 PM\nWould you like to:\n1. View detailed breakdown\n2. Set up usage alerts\n3. Change your plan",
-                "weekly_usage": f"Here's your weekly usage breakdown:\n- Data used: {user_data.get('data_usage', 'N/A')}GB\n- Data remaining: {user_data.get('data_limit', 'N/A')}GB\n- Peak usage times: 2 PM - 8 PM\nWould you like to:\n1. View detailed breakdown\n2. Set up usage alerts\n3. Change your plan",
-                "monthly_usage": f"Here's your monthly usage breakdown:\n- Data used: {user_data.get('data_usage', 'N/A')}GB\n- Data remaining: {user_data.get('data_limit', 'N/A')}GB\n- Peak usage times: 2 PM - 8 PM\nWould you like to:\n1. View detailed breakdown\n2. Set up usage alerts\n3. Change your plan",
-                "set_alert_threshold": "Please enter the percentage threshold for your usage alert (e.g., 80 for 80% of your data limit)",
-                "set_alert_frequency": "How often would you like to receive alerts?\n1. Daily\n2. Weekly\n3. When threshold is reached",
-                "view_current_alerts": "Your current alert settings:\n- Threshold: 80%\n- Frequency: Daily\n- Status: Active\nWould you like to:\n1. Modify threshold\n2. Change frequency\n3. Disable alerts",
-                "increase_data": "To increase your data allowance, please select a new plan:\n1. Basic: $49.99/month (50GB data)\n2. Premium: $99.99/month (100GB data)\n3. Business: $199.99/month (Unlimited data)",
-                "decrease_data": "To decrease your data allowance, please select a new plan:\n1. Basic: $49.99/month (50GB data)\n2. Premium: $99.99/month (100GB data)\n3. Business: $199.99/month (Unlimited data)",
-                "view_plan_options": "Here are your current plan options:\n1. Basic: $49.99/month (50GB data)\n2. Premium: $99.99/month (100GB data)\n3. Business: $199.99/month (Unlimited data)\nWould you like to:\n1. Compare features\n2. Switch plan\n3. View current usage"
-            }
-            return responses.get(intent, "I'm not sure how to help with that specific option. Please try again.")
+            # Get the menu structure for the current intent
+            menu = self.menu_structure.get(intent, {})
+            if not menu:
+                return "I'm not sure how to help with that specific option. Please try again."
+
+            # Build the response based on the menu structure
+            response = f"{menu['title']}\n\n"
+            
+            # Add user data if available
+            if intent == "account_info":
+                response += f"Your account {user_data.get('account_number', 'N/A')} is currently {user_data.get('status', 'N/A')}. "
+                response += f"Your plan is {user_data.get('plan_type', 'N/A')} with a monthly fee of {user_data.get('monthly_fee', 'N/A')}.\n\n"
+            
+            # Add menu options
+            response += "Would you like to:\n"
+            for option_num, option in menu["options"].items():
+                response += f"{option_num}. {option['text']}\n"
+            
+            # Add back option if not in main menu
+            if intent != "main_menu" and len(self.menu_history) > 0:
+                response += "\nOr type 'back' to return to the previous menu."
+            
+            return response
+            
         except Exception as e:
             print(f"Error in handle_numbered_menu_response: {str(e)}")
             return "I apologize, but I encountered an error while processing your request. Please try again."
 
-    def get_follow_up_questions(self, intent: str) -> str:
-        """Get relevant follow-up questions based on the intent"""
-        follow_ups = {
-            "payment": "Would you like to:\n1. Make a payment now\n2. Set up automatic payments\n3. View payment history",
-            "billing": "Would you like to:\n1. View your bill details\n2. Download your bill\n3. Set up paperless billing",
-            "technical_support": "Would you like to:\n1. Try basic troubleshooting\n2. Schedule a technician visit\n3. Check service status in your area",
-            "account_info": "Would you like to:\n1. Update your account details\n2. Change your plan\n3. View your usage",
-            "plan_info": "Would you like to:\n1. Compare available plans\n2. Upgrade your current plan\n3. View plan features"
-        }
-        return follow_ups.get(intent, "")
+    def get_response(self, message: str, user_data: Optional[Dict[str, Any]] = None) -> str:
+        """
+        Get response for user message using OpenAI API and predefined responses
+        """
+        try:
+            # Handle back command
+            if message.lower().strip() == 'back':
+                if len(self.menu_history) > 0:
+                    # Go back to previous menu
+                    self.last_intent = self.menu_history.pop()
+                    return self.get_rule_response(
+                        self.last_intent,
+                        user_data.get("_id") if user_data else None,
+                        {}
+                    )
+                else:
+                    # If no history, go to main menu
+                    self.last_intent = "main_menu"
+                    return self.get_rule_response(
+                        "main_menu",
+                        user_data.get("_id") if user_data else None,
+                        {}
+                    )
 
-    def process_message(self, user_id: str, message: str) -> str:
-        """Process user message and return appropriate response"""
-        # Analyze intent using OpenAI
-        analysis = self.analyze_intent(message)
-        
-        # Get response based on intent and user data
-        response = self.get_rule_response(
-            analysis['intent'],
-            user_id,
-            analysis['entities']
-        )
-        
-        # Save the conversation
-        self.db.save_conversation(user_id, message, response)
-        
-        return response
+            # Check if the message is a numbered response
+            if message.strip().isdigit():
+                # Get the intent based on the numbered response
+                intent_analysis = self.handle_numbered_response(message)
+                # Get the rule-based response for this intent
+                return self.get_rule_response(intent_analysis["intent"], user_data.get("_id") if user_data else None, intent_analysis.get("entities", {}))
+
+            # First, try to match with predefined responses
+            intent = self.db.get_intent_by_keyword(message.lower())
+            if intent:
+                # Store the intent for future numbered responses
+                self.last_intent = intent
+                response = self.db.get_response_by_intent(intent)
+                if response:
+                    return response
+
+            # If no predefined response, analyze intent
+            intent_analysis = self.analyze_intent(message)
+            # Store the intent for future numbered responses
+            self.last_intent = intent_analysis["intent"]
+            
+            # Get rule-based response
+            return self.get_rule_response(
+                intent_analysis["intent"],
+                user_data.get("_id") if user_data else None,
+                intent_analysis.get("entities", {})
+            )
+            
+        except Exception as e:
+            print(f"Error getting response: {str(e)}")
+            return "I apologize, but I'm having trouble processing your request. Please try again later."
 
     def close(self):
         """Close database connection"""

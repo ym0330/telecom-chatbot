@@ -1,71 +1,95 @@
-# Telecom Issue Resolution Chatbot
+# Telecom Chatbot
 
-A rule-based chatbot for resolving telecom issues using OpenAI API and MongoDB.
+A web-based chatbot application for telecom customer service, built with FastAPI and MongoDB.
 
 ## Features
 
-- Rule-based responses for common telecom issues
-- AI-powered responses using OpenAI GPT-3.5
-- Conversation history storage in MongoDB
-- RESTful API using FastAPI
-- Predefined rules for network, billing, and account issues
+- User authentication (registration and login)
+- Secure password hashing
+- JWT token-based authentication
+- Chat interface with telecom-specific responses
+- User profile management
+- Chat history tracking
+- Fuzzy matching for better response accuracy
 
 ## Prerequisites
 
 - Python 3.8 or higher
-- MongoDB installed and running locally
+- MongoDB
 - OpenAI API key
 
-## Setup
+## Installation
 
-1. Clone the repository
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-3. Create a `.env` file with the following variables:
-   ```
-   OPENAI_API_KEY=your_openai_api_key_here
-   MONGODB_URI=mongodb://localhost:27017/
-   DATABASE_NAME=telecom_chatbot
-   COLLECTION_NAME=chat_history
-   ```
+1. Clone the repository:
+```bash
+git clone <repository-url>
+cd telecom-chatbot
+```
+
+2. Create and activate a virtual environment:
+```bash
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+```
+
+3. Install dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+4. Create a `.env` file in the project root with the following variables:
+```
+MONGODB_URI=mongodb://localhost:27017/
+OPENAI_API_KEY=your_openai_api_key
+SECRET_KEY=your_secret_key
+```
 
 ## Running the Application
 
 1. Start the FastAPI server:
-   ```bash
-   python src/main.py
-   ```
-2. The API will be available at `http://localhost:8000`
-
-## API Usage
-
-Send a POST request to `/chat` endpoint with the following JSON body:
-```json
-{
-    "user_id": "user123",
-    "message": "I'm having network issues"
-}
+```bash
+uvicorn src.main:app --reload
 ```
 
-The response will be in the format:
-```json
-{
-    "response": "I can help you with your network issue..."
-}
+2. Open your web browser and navigate to:
+```
+http://localhost:8000
+```
+
+## API Documentation
+
+Once the server is running, you can access the API documentation at:
+```
+http://localhost:8000/docs
 ```
 
 ## Project Structure
 
-- `src/`: Source code directory
-  - `main.py`: FastAPI application entry point
-  - `chatbot.py`: Main chatbot logic
-  - `database.py`: MongoDB database handler
-  - `rules.py`: Rule-based response handler
-- `.env`: Environment variables configuration
-- `requirements.txt`: Project dependencies
+```
+telecom_chatbot/
+├── src/
+│   ├── __init__.py
+│   ├── main.py
+│   ├── auth.py
+│   ├── database.py
+│   └── chatbot.py
+├── static/
+│   ├── css/
+│   └── js/
+├── templates/
+│   └── index.html
+├── requirements.txt
+└── README.md
+```
 
-## Customizing Rules
+## Contributing
 
-You can modify the rules in `src/rules.py` to add or update predefined responses for different types of telecom issues. 
+1. Fork the repository
+2. Create a feature branch
+3. Commit your changes
+4. Push to the branch
+5. Create a Pull Request
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details. 

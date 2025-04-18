@@ -1,74 +1,161 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from fastapi import Request
+from datetime import datetime, timedelta
+from typing import Optional
 from pydantic import BaseModel
-from chatbot import TelecomChatbot
-import uvicorn
-import logging
+import os
+from dotenv import load_dotenv
+from database import DatabaseHandler
+from auth import (
+    verify_password, get_password_hash, create_access_token,
+    get_current_user, get_current_active_user, register_user,
+    login_user, get_user_profile, update_user_profile, change_password
+)
+from chatbot import TelecomChatbot as Chatbot
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Load environment variables
+load_dotenv()
 
-app = FastAPI(
-    title="Telecom Chatbot API",
-    description="A chatbot API for handling telecom customer service queries",
-    version="1.0.0"
+# Initialize FastAPI app
+app = FastAPI(title="Telecom Chatbot API")
+
+# Configure CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # In production, replace with specific origins
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-try:
-    logger.info("Initializing chatbot...")
-    chatbot = TelecomChatbot()
-    logger.info("Chatbot initialized successfully!")
-except Exception as e:
-    logger.error(f"Failed to initialize chatbot: {str(e)}")
-    raise
+# Mount static files
+app.mount("/static", StaticFiles(directory="src/static"), name="static")
 
-class ChatRequest(BaseModel):
-    user_id: str
+# Templates
+templates = Jinja2Templates(directory="src/templates")
+
+# Initialize database and chatbot
+db = DatabaseHandler()
+chatbot = Chatbot()
+
+# OAuth2 scheme
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+# Pydantic models
+class ChatMessage(BaseModel):
     message: str
 
-class ChatResponse(BaseModel):
-    response: str
-
 @app.get("/")
-async def root():
-    return {
-        "message": "Welcome to Telecom Chatbot API",
-        "endpoints": {
-            "chat": "/chat",
-            "docs": "/docs"
-        },
-        "usage": {
-            "chat_endpoint": {
-                "method": "POST",
-                "url": "/chat",
-                "body": {
-                    "user_id": "string",
-                    "message": "string"
-                }
-            }
-        }
-    }
+async def read_root():
+    """Serve the main page"""
+    return FileResponse("src/static/index.html")
 
-@app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
+@app.post("/register")
+async def register(form_data: OAuth2PasswordRequestForm = Depends()):
+    """Register a new user"""
+    success, message = register_user(form_data.username, form_data.username, form_data.password)
+    if not success:
+        raise HTTPException(status_code=400, detail=message)
+    return {"message": message}
+
+@app.post("/token")
+async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    """Login user and return access token"""
+    success, message, data = login_user(form_data.username, form_data.password)
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=message,
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return data
+
+@app.get("/users/me")
+async def read_users_me(current_user = Depends(get_current_active_user)):
+    """Get current user profile"""
+    return current_user
+
+@app.get("/users/me/profile")
+async def get_profile(current_user = Depends(get_current_active_user)):
+    """Get user profile with telecom data"""
+    profile = get_user_profile(current_user["username"])
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return profile
+
+@app.put("/users/me/profile")
+async def update_profile(
+    update_data: dict,
+    current_user = Depends(get_current_active_user)
+):
+    """Update user profile"""
+    success, message = update_user_profile(current_user["username"], update_data)
+    if not success:
+        raise HTTPException(status_code=400, detail=message)
+    return {"message": message}
+
+@app.post("/users/me/change-password")
+async def update_password(
+    current_password: str,
+    new_password: str,
+    current_user = Depends(get_current_active_user)
+):
+    """Change user password"""
+    success, message = change_password(
+        current_user["username"],
+        current_password,
+        new_password
+    )
+    if not success:
+        raise HTTPException(status_code=400, detail=message)
+    return {"message": message}
+
+@app.post("/chat")
+async def chat(
+    chat_message: ChatMessage,
+    current_user = Depends(get_current_active_user)
+):
+    """Process chat message and return response"""
     try:
-        response = chatbot.process_message(request.user_id, request.message)
-        return ChatResponse(response=response)
+        # Get user's telecom data
+        user_data = db.get_user_data(current_user["_id"])
+        
+        # Get chatbot response
+        response = chatbot.get_response(chat_message.message, user_data)
+        
+        # Save conversation
+        db.save_conversation(
+            str(current_user["_id"]),
+            chat_message.message,
+            response
+        )
+        
+        return {"response": response}
     except Exception as e:
-        logger.error(f"Error processing message: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    chatbot.close()
+@app.get("/chat/history")
+async def get_chat_history(
+    current_user = Depends(get_current_active_user),
+    limit: int = 50
+):
+    """Get user's chat history"""
+    try:
+        history = db.get_chat_history(str(current_user["_id"]), limit)
+        return {"history": history}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {"status": "healthy"}
 
 if __name__ == "__main__":
-    try:
-        print("🚀 Starting Telecom Chatbot API...")
-        print("📚 API documentation will be available at: http://localhost:8000/docs")
-        print("🔥 API endpoint will be available at: http://localhost:8000/chat")
-        print("🌐 Welcome page will be available at: http://localhost:8000/")
-        uvicorn.run(app, host="localhost", port=8000, log_level="info")
-    except Exception as e:
-        logger.error(f"Failed to start server: {str(e)}")
-        raise 
+    import uvicorn
+    uvicorn.run(app, host="localhost", port=8000) 
